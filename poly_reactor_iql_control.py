@@ -251,7 +251,7 @@ def simulate_many_runs(n_runs: int = 20,
                 "run_id": run,
                 "time_min": t_clock / 60,
                 "A": A, "I": I, "R": R_,
-                "P": P, "T_s": T_s,
+                "P": P, "T": T_s,
                 "err_P": setpts["P"] - P,
                 "err_T": setpts["T_s"] - T_s,
                 "int_err_P": int_P / 1000,
@@ -278,7 +278,7 @@ if __name__ == "__main__":
 #  (adds four new columns: P_phys, T_phys, f_I_phys, T_c_phys)
 # ---------------------------------------------------------------------------
 df["P_phys"]   = df["P"]  * S_CONC
-df["T_phys"]   = df["T_s"]  * S_TEMP
+df["T_phys"]   = df["T"]  * S_TEMP
 df["f_I_phys"] = I_MIN  + df["u_I"]  * (I_MAX  - I_MIN)
 df["T_c_phys"] = TC_MIN + df["u_Tc"] * (TC_MAX - TC_MIN)
 

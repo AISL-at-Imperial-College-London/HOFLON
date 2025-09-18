@@ -154,6 +154,33 @@ except ImportError:
     HAVE_DIRECT = False                 # graceful fallback
     # If DIRECT is missing you can: pip install --upgrade scipy>=1.11
 
+
+# ── hybrid reward (scaled states & inputs 0-1) ───────────────────────────────
+def compute_reward(poly_t, T_s_t,              # state at k+1  (scaled)
+                   poly_prev, T_s_prev,        # state at k
+                   u_t, u_prev,                # actions (u_I, u_Tc) at k, k-1
+                   setpts: dict[str, float],
+                   λ1: float, λ2: float,       # action-smoothing weights
+                   σ: float = 0.05) -> float:  # proximity width
+    """
+    + Proximity term   → large when error_now ≈ 0
+    + Progress term    → positive when total MSE decreases
+    − Control penalty  → discourage large Δu
+    """
+    # instantaneous squared error
+    err_now  = (poly_t - setpts["P"])**2 + (T_s_t - setpts["T_s"])**2
+    err_prev = (poly_prev - setpts["P"])**2 + (T_s_prev - setpts["T_s"])**2
+    Δerr     = err_prev - err_now                       # improvement
+
+    proximity = -err_now + np.exp(-err_now / σ**2)
+    progress  = Δerr
+
+    ΔI, ΔTc = u_t[0] - u_prev[0], u_t[1] - u_prev[1]
+    ctrl_pen = λ1 * ΔI**2 + λ2 * ΔTc**2
+
+    return 50*proximity + 5_000*progress - 0*ctrl_pen
+
+
 # ────────────────────────────────────────────────────────────────────────────
 def optim_controller(y_s, int_P, int_T, u_prev, setpt, dt):
     """
@@ -268,6 +295,10 @@ def simulate_many_runs(n_runs=100,
         u_prev   = np.zeros(2)
         t        = 0.0
         n_steps  = int(t_total // dt)
+        
+        prev_poly_meas = None
+        prev_Ts_meas   = None
+        prev_u         = np.zeros(2)   # same shape as u_prev
 
         for _ in range(n_steps):
 
@@ -277,14 +308,12 @@ def simulate_many_runs(n_runs=100,
             y_meas[3] += rng.normal(0.0, SIG_POLY_S)   # polymer
             y_meas[4] += rng.normal(0.0, SIG_TEMP_S)   # temperature
 
-            # 2. controller uses noisy measurements ------------------------
+             # 2) controller uses noisy measurements
             t0 = time.perf_counter()
-            u_I, Tc_s, int_P, int_T = optim_controller(
-                y_meas, int_P, int_T, u_prev, setpt, dt
-            )
+            u_I, Tc_s, int_P, int_T = optim_controller(y_meas, int_P, int_T, u_prev, setpt, dt)
             OPT_SOLVE_TIMES.append(time.perf_counter() - t0)
-
-            # 3. integrate true plant (noise-free) --------------------------
+            
+            # 3) integrate true plant (noise-free)
             sol = solve_ivp(
                 lambda tt, yy: cstr_ode_scaled(tt, yy, u_I, Tc_s),
                 [0, dt], y_s,
@@ -292,8 +321,30 @@ def simulate_many_runs(n_runs=100,
             )
             y_s = sol.y[:, -1]
             t  += dt
+            
+            # --- reward on noisy states -----------------------------------
+            if (prev_poly_meas is None) or (prev_Ts_meas is None):
+                reward = 0.0   # no previous sample yet
+            else:
+                reward = compute_reward(
+                    poly_t   = y_meas[3],          # current noisy polymer
+                    T_s_t    = y_meas[4],          # current noisy temperature
+                    poly_prev= prev_poly_meas,     # previous noisy polymer
+                    T_s_prev = prev_Ts_meas,       # previous noisy temperature
+                    u_t      = np.array([u_I, Tc_s]),
+                    u_prev   = prev_u,             # previous action
+                    setpts   = setpt,              # <-- FIX: pass the dict, not y_s
+                    λ1       = 1.0,
+                    λ2       = 1.0
+                )
+            
+            # update "previous" trackers for next step
+            prev_poly_meas = y_meas[3]
+            prev_Ts_meas   = y_meas[4]
+            prev_u         = np.array([u_I, Tc_s])
+            
+            # now update u_prev used by controller anti-windup in next call
             u_prev = np.array([u_I, Tc_s])
-
             # 4. tracking errors (noisy) -----------------------------------
             err_P_s = setpt["P"]   - y_meas[3]
             err_T_s = setpt["T_s"] - y_meas[4]
@@ -306,13 +357,14 @@ def simulate_many_runs(n_runs=100,
                 I          = y_meas[1],
                 R_rad      = y_meas[2],
                 P          = y_meas[3],
-                T_s        = y_meas[4],
-                err_P_s    = err_P_s,
-                err_T_s    = err_T_s,
+                T        = y_meas[4],
+                err_P    = err_P_s,
+                err_T    = err_T_s,
                 int_err_P  = int_P,
                 int_err_T  = int_T,
                 u_I        = u_I,
-                u_Tc       = Tc_s
+                u_Tc       = Tc_s,
+                reward     = reward
             ))
 
         # ── per-run timing summary (after inner loop) ----------------------
@@ -344,10 +396,10 @@ if __name__ == "__main__":
     print("\n=== optimiser timing per run (ms) ===")
     print(dft.round(1))
 
-    df.to_csv("opt_control_dataset.csv",index=False)
+    df.to_csv("opt_control_dataset_with_reward.csv",index=False)
 
     # physical for plots
-    df["P_phys"]=df["P"]*S_CONC; df["T_phys"]=df["T_s"]*S_TEMP
+    df["P_phys"]=df["P"]*S_CONC; df["T_phys"]=df["T"]*S_TEMP
     df["f_I"]=I_MIN+df["u_I"]*(I_MAX-I_MIN)
     df["T_c"]=TC_MIN+df["u_Tc"]*(TC_MAX-TC_MIN)
 
